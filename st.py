@@ -1,6 +1,17 @@
 import numpy as np
 import numpy.typing as npt
 
+
+def check_for_minor_principals(A) -> bool:
+    n = A.shape[0]
+    for k in range(n):
+        Ak = A[:k + 1, :k + 1]
+        is_singular = np.linalg.det(Ak) == 0.0
+        if is_singular:
+            return False
+    return True
+
+
 def __st_base_case(A: npt.NDArray):
     a, b, c, d = A.flatten()
     a_negative = a < 0
