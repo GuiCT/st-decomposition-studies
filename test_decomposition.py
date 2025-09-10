@@ -1,8 +1,10 @@
 from argparse import ArgumentParser
-from logging import Logger
-import pandas as pd
+from collections import OrderedDict
+from hashlib import sha1
+from logging import Formatter, Logger, StreamHandler
 
 import numpy as np
+import pandas as pd
 
 from st import check_for_minor_principals, st
 
@@ -11,61 +13,90 @@ parser = ArgumentParser(
     description="Tests the ST decomposition for random integer A matrices",
 )
 parser.add_argument("-c", "--count", default=100)
-parser.add_argument("-st", "--store", action="store_true")
-parser.add_argument("-o", "--output")
+output_res_args = parser.add_argument_group("results options")
+output_res_args.add_argument("-or", "--output-results", default=None)
+output_log_args = parser.add_argument_group("log options")
+output_log_args.add_argument("-ol", "--output-log", default=None)
+output_matrices_args = parser.add_argument_group("save matrices options")
+output_matrices_args.add_argument("-om", "--output-matrices", default=None)
+decomposition_settings_args = parser.add_argument_group(
+    "decomposition settings")
+decomposition_settings_args.add_argument("-s", "--size", default=10)
+decomposition_settings_args.add_argument("-t", "--tolerance", default=0.1)
+
+logger = Logger("DecompositionTester", level="INFO")
+formatter = Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler = StreamHandler()
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 if __name__ == "__main__":
     args = parser.parse_args()
+    if args.output_log is not None:
+        file_handler = StreamHandler(
+            open(args.output_log, "a", encoding="utf-8"))
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
     count = int(args.count)
-    cols = {"A": [], "S": [], "T": [], "norm_frob": [], "norm_2": [], "norm_infinity": []}
-
-    max_residuals = {
-        "frob": -np.inf,
-        "2": -np.inf,
-        "infinity": -np.inf,
+    n = int(args.size)
+    tol = float(args.tolerance)
+    norms = {
+        "frob": "fro",
+        "2": 2,
+        "infinity": np.inf
     }
+
+    cols = {"i": [], "A_hash": []}
+    for norm in norms:
+        cols[f"norm_{norm}"] = []
+    matrices_dict = OrderedDict[str, np.ndarray]()
+
     # Creating {{count}} different square matrices and testing the function
     for i in range(count):
         try:
             while True:
-                n = 20
                 A = np.random.rand(n, n) * 10 - 5
-                if check_for_minor_principals(A):
+                if check_for_minor_principals(A, tol):
                     S, T = st(A)
                     break
-        except ValueError:
+        except ValueError as e:
+            logger.error(f"Matrix {i+1} could not be decomposed")
+            logger.error(e)
+            logger.error(A)
             continue
-        print(f"Matrix {i+1}:")
-        print("S:", S)
-        print("T:", T)
+        A_hash = sha1(A.data).hexdigest()
+        if args.output_matrices is not None:
+            triple = np.zeros((3, *A.shape))
+            triple[0, :, :] = A
+            triple[1, :, :] = S
+            triple[2, :, :] = T
+            matrices_dict[A_hash] = triple
+        logger.info(
+            f"========== Matrix {i+1} ({A_hash[:3]}...{A_hash[-3:]}) ==========")
         A_minus_ST = A - S @ T
-        norm_frob = np.linalg.norm(A_minus_ST, ord="fro")
-        norm_2 = np.linalg.norm(A_minus_ST, ord=2)
-        norm_infty = np.linalg.norm(A_minus_ST, np.inf)
-        print("||A - ST||F", norm_frob)
-        print("||A - ST||2", norm_2)
-        if args.store:
-            cols["A"].append(A)
-            cols["S"].append(S)
-            cols["T"].append(T)
-            cols["norm_frob"].append(norm_frob)
-            cols["norm_2"].append(norm_2)
-            cols["norm_infinity"].append(norm_infty)
-        max_residuals["2"] = np.maximum(max_residuals["2"], norm_2)
-        max_residuals["frob"] = np.maximum(max_residuals["frob"], norm_frob)
-        max_residuals["infinity"] = np.maximum(max_residuals["infinity"], norm_infty)
-    print("Max residual (Frobenius):", max_residuals["frob"])
-    print("Max residual (2-order):", max_residuals["2"])
-    print("Max residual (infinity-order):", max_residuals["infinity"])
-    if args.store:
-        res_df = pd.DataFrame(
-            columns=["A", "S", "T", "||A - ST||_Frobenius", "||A - ST||_2", "||A - ST||_infinity"]
-        )
-        res_df["A"] = cols["A"]
-        res_df["S"] = cols["S"]
-        res_df["T"] = cols["T"]
-        res_df["||A - ST||_Frobenius"] = cols["norm_frob"]
-        res_df["||A - ST||_2"] = cols["norm_2"]
-        res_df["||A - ST||_infinity"] = cols["norm_infinity"]
-        out = "out.csv" if args.output is None else args.output
-        res_df.to_csv(out, index=False)
+        for norm in norms:
+            cols[f"norm_{norm}"].append(
+                np.linalg.norm(A_minus_ST, ord=norms[norm]))
+            logger.info(f"||A - ST||{norm}: {cols[f'norm_{norm}'][-1]}")
+        cols["i"].append(i)
+        cols["A_hash"].append(A_hash)
+    logger.info("====================")
+    logger.info("========== STATS ==========")
+    max_residuals = {k: np.argmax(cols[f"norm_{k}"]) for k in norms}
+    mean_residuals = {k: np.mean(cols[f"norm_{k}"]) for k in norms}
+    logger.info("========== WORST CASE SCENARIOS ==========")
+    for k in norms:
+        max_hash = cols["A_hash"][max_residuals[k]]
+        logger.info(
+            f"Max residual (||.||_{k}, {max_hash[:3]}...{max_hash[-3:]}): {cols[f'norm_{k}'][max_residuals[k]]}")
+    logger.info("========== AVERAGE CASE SCENARIOS ==========")
+    for k in norms:
+        logger.info(f"Mean residual (||.||_{k}): {mean_residuals[k]}")
+    logger.info("====================")
+
+    if args.output_results is not None:
+        res_df = pd.DataFrame(cols)
+        res_df.to_csv(args.output_results, index=False)
+
+    if args.output_matrices is not None:
+        np.savez_compressed(args.output_matrices, **matrices_dict) # type: ignore
